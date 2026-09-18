@@ -18,14 +18,14 @@
 1. **生产档案**：地块（地理坐标/面积/土壤）、作物、种植批次（`batch_id`）。
 2. **农事记录上报**：施肥/用药/灌溉/除草，含时间、投入品名称、用量、操作人、照片；支持**离线批量补报**（客户端带 `client_uuid`，服务端幂等去重）。
 3. **采收与检测**：采收日期、产量、农残检测报告（图片 + 结论），检测不合格批次直接锁定不可发码。
-4. **溯源码生成**：一个批次拆成若干包装单位，批量生成唯一 `trace_code`（短码 + 校验位，防手输错误）。
-5. **扫码查询**：公开只读接口，输入 code 返回溯源链（脱敏：不暴露农户手机号/精确坐标，只给村级位置）。
+4. **溯源码生成**：一个批次拆成若干包装单位，批量生成唯一 `trace_code`（短码 + 校验位，防手输错误）；发码时必须指定包装单位（`package_unit` 字典：袋/盒/箱…），一条码与一包装单位严格对应，可随时反查。
+5. **扫码查询**：公开只读接口，输入 code 只返回核对真伪必需的信息（批次/地块/检测结论/包装单位/首次扫码留痕）；农事明细（操作人姓名、投入品用量、施药次数等个人与生产信息）一律不下发；不暴露农户手机号/精确坐标，只给村级位置。
 6. **基础资料**：投入品字典（农药登记证号、安全间隔期）。
 
 ## 5. 进阶功能
 - 安全间隔期校验：距上次施药不足间隔期就采收 → 返回 `WARNING` 并禁止发码。
 - 二维码预生成 PDF 印刷文件（批量、含排版）。
-- 防伪：一个码首次被扫记录首次扫码时间与地区，二次扫码提示。
+- 防伪：每次扫码都在 `trace_scan` 留痕。`first_scanned_at` 用条件更新（`WHERE first_scanned_at IS NULL`）原子抢占，并发重复扫码也只会有一次判定为「首次」；返回 `first_scan` 与累计 `scan_count`（1=首次，>1=再次扫码，重复扫第二次起即提示）。首次扫码的地区只取扫码端定位授权后显式上报的 6 位行政区划码（`?region=`，服务端校验合法性），**不用 `X-Forwarded-For`/对端 IP 等请求来源信息推断或冒充**；未上报时地区记为未知。
 - 数据导出给监管平台（JSON/XML 标准格式适配器）。
 
 ## 6. 接口设计（节选）
@@ -35,8 +35,9 @@ POST /api/v1/plots                          地块登记
 POST /api/v1/batches                        创建种植批次
 POST /api/v1/batches/{id}/activities        农事记录（支持数组批量，client_uuid 幂等）
 POST /api/v1/batches/{id}/inspection        上传检测结果
-POST /api/v1/batches/{id}/codes             生成溯源码（返回数量与短码列表）
-GET  /api/v1/trace/{code}                   公开溯源查询（无需鉴权，限流）
+POST /api/v1/batches/{id}/codes             生成溯源码（body: {"count":n,"package_unit":"bag|box|case"}，返回数量与短码列表）
+GET  /api/v1/trace/{code}                   公开溯源查询（无需鉴权，限流；可选 ?region=6位行政区划码）
+GET  /api/v1/trace/{code}/validate          仅校验码本身校验位真伪
 GET  /api/v1/trace/{code}/qrcode            返回二维码 PNG（带缓存头）
 ```
 
@@ -49,7 +50,10 @@ activity(id, batch_id, client_uuid UNIQUE, kind /* fertilize|pesticide|irrigatio
          input_id, dose, dose_unit, operator, photos jsonb, geo, created_at)
 input_material(id, name, type, registration_no, safe_interval_days, active_ingredient)
 inspection(id, batch_id, lab, sampled_at, result /* pass|fail */, report_url, items jsonb)
-trace_code(id, batch_id, code UNIQUE, seq, printed_at, first_scanned_at, first_scan_region)
+package_unit(code, name, sort_order)                                        -- 包装单位字典：袋/盒/箱
+trace_code(id, batch_id, code UNIQUE, seq, package_unit_code FK→package_unit, printed_at,
+           first_scanned_at, first_scan_region)
+trace_scan(id, trace_code_id FK, scanned_at, region_code /* 扫码端上报，非 IP */, source)  -- 每次扫码留痕
 ```
 
 ## 8. 关键实现点
@@ -57,7 +61,8 @@ trace_code(id, batch_id, code UNIQUE, seq, printed_at, first_scanned_at, first_s
 - **短码设计**：`Base32(时间戳低 32 位 + 批次序号 + CRC8)` 共 10 位，带校验位，扫码和手输都可。
 - **时序完整性**：写入 activity 时校验 `happened_at` 不早于播种、不晚于采收，非法则拒绝（或标 `needs_review`）。
 - **图片处理**：上传走预签名 URL 直传 MinIO，服务端只存 key；生成缩略图用于扫码页。
-- **公开接口防护**：`/trace/{code}` 按 IP 限流（Redis 令牌桶，如 30 次/分钟），并对返回体脱敏。
+- **公开接口防护与脱敏**：`/trace/{code}` 按 IP 限流（Redis 令牌桶，如 30 次/分钟）；返回体只含防伪必需信息，**不下发任何农事活动明细**（`operator` 操作人姓名、`dose/dose_unit` 用量、施药次数等均不出现），也不暴露手机号与精确坐标。
+- **首次扫码判定**：读-判-写必须原子（条件 UPDATE + 事务写 `trace_scan`），避免并发/重扫时把再次扫码误判为首次。
 - **安全间隔期**：发码时 `SELECT max(happened_at)` 与 `harvest_date` 比较，不足则拒绝。
 
 ## 9. 技术约束与性能

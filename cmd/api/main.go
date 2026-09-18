@@ -66,7 +66,7 @@ func main() {
 	batchSvc := service.NewBatchService(batchRepo, plotRepo, farmRepo)
 	activitySvc := service.NewActivityService(activityRepo, batchRepo)
 	inspectionSvc := service.NewInspectionService(inspectionRepo, batchRepo)
-	traceCodeSvc := service.NewTraceCodeService(codeRepo, batchRepo, inspectionRepo, activityRepo, plotRepo, farmRepo)
+	traceCodeSvc := service.NewTraceCodeService(codeRepo, batchRepo, inspectionRepo, plotRepo, farmRepo)
 
 	// Handlers
 	farmH := handler.NewFarmHandler(farmSvc)
