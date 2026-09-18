@@ -4,14 +4,19 @@ import (
 	"cc-052/internal/model"
 	"cc-052/internal/repository"
 	"cc-052/pkg/tracecode"
+	"database/sql"
+	"errors"
 	"fmt"
+	"time"
 )
+
+// ErrTraceCodeNotFound 表示溯源码不存在。
+var ErrTraceCodeNotFound = errors.New("trace code not found")
 
 type TraceCodeService struct {
 	codeRepo       *repository.TraceCodeRepo
 	batchRepo      *repository.BatchRepo
 	inspectionRepo *repository.InspectionRepo
-	activityRepo   *repository.ActivityRepo
 	plotRepo       *repository.PlotRepo
 	farmRepo       *repository.FarmRepo
 }
@@ -20,7 +25,6 @@ func NewTraceCodeService(
 	codeRepo *repository.TraceCodeRepo,
 	batchRepo *repository.BatchRepo,
 	inspectionRepo *repository.InspectionRepo,
-	activityRepo *repository.ActivityRepo,
 	plotRepo *repository.PlotRepo,
 	farmRepo *repository.FarmRepo,
 ) *TraceCodeService {
@@ -28,7 +32,6 @@ func NewTraceCodeService(
 		codeRepo:       codeRepo,
 		batchRepo:      batchRepo,
 		inspectionRepo: inspectionRepo,
-		activityRepo:   activityRepo,
 		plotRepo:       plotRepo,
 		farmRepo:       farmRepo,
 	}
@@ -96,16 +99,20 @@ func (s *TraceCodeService) GenerateCodes(batchID int64, count int) ([]string, er
 	return allCodes, nil
 }
 
-func (s *TraceCodeService) Trace(code string, region string) (*model.TraceResponse, error) {
-	tc, err := s.codeRepo.GetByCode(code)
+// Trace 记录一次扫码并返回扫码页数据。
+// 返回体只含核对真伪必需的内容（批次、产地、检测结论、包装单位、扫码防伪信息），
+// 不包含操作人、用量、施药次数等个人信息与生产细节。
+// region 为服务端解析出的扫码地区，nil 表示未知。
+func (s *TraceCodeService) Trace(code string, region *string) (*model.TraceResponse, error) {
+	// 原子记录扫码：scan_count 恒加一，首扫时间与地区只在首次写入。
+	tc, err := s.codeRepo.RecordScan(code, region)
 	if err != nil {
-		return nil, fmt.Errorf("code not found: %w", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrTraceCodeNotFound
+		}
+		return nil, fmt.Errorf("record scan: %w", err)
 	}
-
-	isFirstScan := tc.FirstScannedAt == nil
-	if isFirstScan {
-		s.codeRepo.MarkScanned(tc.ID, region)
-	}
+	isFirstScan := tc.ScanCount == 1
 
 	batch, err := s.batchRepo.GetByID(tc.BatchID)
 	if err != nil {
@@ -122,16 +129,18 @@ func (s *TraceCodeService) Trace(code string, region string) (*model.TraceRespon
 		return nil, err
 	}
 
-	activities, err := s.activityRepo.ListByBatch(tc.BatchID)
+	inspection, _ := s.inspectionRepo.GetByBatch(tc.BatchID)
+
+	// 包装单位对应关系：该码是批次内第几件、批次共几件。
+	totalUnits, err := s.codeRepo.CountByBatch(tc.BatchID)
 	if err != nil {
 		return nil, err
 	}
 
-	inspection, _ := s.inspectionRepo.GetByBatch(tc.BatchID)
-
 	resp := &model.TraceResponse{
 		Code:      code,
 		FirstScan: isFirstScan,
+		ScanCount: tc.ScanCount,
 		Batch: &model.TraceBatchInfo{
 			CropID:      batch.CropID,
 			SowingDate:  batch.SowingDate.Format("2006-01-02"),
@@ -140,23 +149,22 @@ func (s *TraceCodeService) Trace(code string, region string) (*model.TraceRespon
 		Farm: &model.TraceFarmInfo{
 			Name:       farm.Name,
 			RegionCode: farm.RegionCode,
-			PlotName:   plot.Name,
 		},
-		Activities: make([]model.TraceActivityInfo, 0),
+		PackageUnit: &model.TracePackageUnitInfo{
+			Seq:   tc.Seq,
+			Total: totalUnits,
+		},
 	}
 	if batch.HarvestDate != nil {
 		resp.Batch.HarvestDate = batch.HarvestDate.Format("2006-01-02")
 	}
 
-	for _, a := range activities {
-		info := model.TraceActivityInfo{
-			Kind:       a.Kind,
-			HappenedAt: a.HappenedAt.Format("2006-01-02"),
-			Operator:   a.Operator,
-			Dose:       a.Dose,
-			DoseUnit:   a.DoseUnit,
-		}
-		resp.Activities = append(resp.Activities, info)
+	// 首扫时间与地区用于二次扫码的防伪提示（“此码已于何时何地被扫”）。
+	if tc.FirstScannedAt != nil {
+		resp.FirstScannedAt = tc.FirstScannedAt.UTC().Format(time.RFC3339)
+	}
+	if tc.FirstScanRegion != nil {
+		resp.FirstScanRegion = *tc.FirstScanRegion
 	}
 
 	if inspection != nil {

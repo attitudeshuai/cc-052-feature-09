@@ -20,6 +20,8 @@ services:
       MINIO_BUCKET: farm-trace
       MINIO_USE_SSL: "false"
       SERVER_PORT: "8160"
+      # 扫码地区服务端网段映射（cidr=地区码;...），空则一律记为未知
+      GEO_REGION_MAP: ""
     depends_on:
       db:
         condition: service_healthy

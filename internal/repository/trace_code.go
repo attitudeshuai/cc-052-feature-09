@@ -2,7 +2,6 @@ package repository
 
 import (
 	"cc-052/internal/model"
-	"time"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -37,21 +36,21 @@ func (r *TraceCodeRepo) BatchInsert(codes []model.TraceCode) error {
 	return tx.Commit()
 }
 
-func (r *TraceCodeRepo) GetByCode(code string) (*model.TraceCode, error) {
+// RecordScan 原子地记录一次扫码并返回更新后的码记录：
+// scan_count 恒加一；首扫时间与首扫地区只在首次扫码时写入，之后不再覆盖。
+// region 为 nil 表示地区未知（服务端无法解析时绝不采信请求自报的来源）。
+func (r *TraceCodeRepo) RecordScan(code string, region *string) (*model.TraceCode, error) {
 	var tc model.TraceCode
-	query := `SELECT id, batch_id, code, seq, printed_at, first_scanned_at, first_scan_region, created_at 
-	          FROM trace_code WHERE code = $1`
-	if err := r.db.Get(&tc, query, code); err != nil {
+	query := `UPDATE trace_code
+	          SET scan_count = scan_count + 1,
+	              first_scanned_at = COALESCE(first_scanned_at, NOW()),
+	              first_scan_region = CASE WHEN first_scanned_at IS NULL THEN $2 ELSE first_scan_region END
+	          WHERE code = $1
+	          RETURNING id, batch_id, code, seq, printed_at, first_scanned_at, first_scan_region, scan_count, created_at`
+	if err := r.db.Get(&tc, query, code, region); err != nil {
 		return nil, err
 	}
 	return &tc, nil
-}
-
-func (r *TraceCodeRepo) MarkScanned(id int64, region string) error {
-	now := time.Now()
-	query := `UPDATE trace_code SET first_scanned_at = $1, first_scan_region = $2 WHERE id = $3`
-	_, err := r.db.Exec(query, now, region, id)
-	return err
 }
 
 func (r *TraceCodeRepo) GetMaxSeqByBatch(batchID int64) (int, error) {

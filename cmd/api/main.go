@@ -6,6 +6,7 @@ import (
 	"cc-052/internal/repository"
 	"cc-052/internal/router"
 	"cc-052/internal/service"
+	"cc-052/pkg/region"
 	"context"
 	"fmt"
 	"log"
@@ -66,7 +67,7 @@ func main() {
 	batchSvc := service.NewBatchService(batchRepo, plotRepo, farmRepo)
 	activitySvc := service.NewActivityService(activityRepo, batchRepo)
 	inspectionSvc := service.NewInspectionService(inspectionRepo, batchRepo)
-	traceCodeSvc := service.NewTraceCodeService(codeRepo, batchRepo, inspectionRepo, activityRepo, plotRepo, farmRepo)
+	traceCodeSvc := service.NewTraceCodeService(codeRepo, batchRepo, inspectionRepo, plotRepo, farmRepo)
 
 	// Handlers
 	farmH := handler.NewFarmHandler(farmSvc)
@@ -74,7 +75,8 @@ func main() {
 	batchH := handler.NewBatchHandler(batchSvc)
 	activityH := handler.NewActivityHandler(activitySvc)
 	inspectionH := handler.NewInspectionHandler(inspectionSvc)
-	traceCodeH := handler.NewTraceCodeHandler(traceCodeSvc)
+	regionResolver := region.NewResolver(cfg.GeoRegionMap)
+	traceCodeH := handler.NewTraceCodeHandler(traceCodeSvc, regionResolver)
 	healthH := handler.NewHealthHandler(db, rdb)
 
 	// Router

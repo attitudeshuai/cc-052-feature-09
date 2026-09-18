@@ -26,6 +26,11 @@ type Config struct {
 	MinIOUseSSL         bool
 
 	ServerPort string
+
+	// GeoRegionMap 是扫码地区的服务端网段映射，格式 "cidr=地区码;cidr=地区码"。
+	// 扫码地区只按真实对端 IP 查该映射得出，未配置或匹配不到即为未知，
+	// 绝不采信客户端自报的来源（X-Forwarded-For 等）。
+	GeoRegionMap string
 }
 
 func Load() *Config {
@@ -47,6 +52,7 @@ func Load() *Config {
 		MinIOBucket:         getEnv("MINIO_BUCKET", "farm-trace"),
 		MinIOUseSSL:         getEnvBool("MINIO_USE_SSL", false),
 		ServerPort:          getEnv("SERVER_PORT", "8080"),
+		GeoRegionMap:        getEnv("GEO_REGION_MAP", ""),
 	}
 	return cfg
 }
